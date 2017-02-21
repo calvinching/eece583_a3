@@ -1,0 +1,13 @@
+To compile the program, execute make on a linux machine:
+
+    make example
+
+*Note: for graphical output, ensure X11 libraries are installed. On ubuntu, you can install using: sudo apt-get install libx11-dev
+
+To run the program, execute the following:
+
+    ./example <benchmark_file>
+
+For example:
+
+    ./example benchmarks/paira.txt
