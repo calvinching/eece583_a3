@@ -10,7 +10,7 @@
 #define DEBUG
 #define SUCCESS 0
 #define ERROR -1
-#define MAX_NUM_SINKS 500
+#define MAX_NUM_CELLS_PER_NET 500
 #define NUM_INIT_ITERATIONS 50 // Number of times to run the random move to find the initial temperature
 #define BETA_TEMP_FACTOR 0.9
 #define EXIT_COUNT 500
@@ -24,22 +24,25 @@ typedef enum PARTITION {
     RIGHT,
 } PARTITION;
 
-typedef struct LOGIC_CELL {
-    int col;
-    int row;
+static char *PARTITION_STR[3] = { "UNKNOWN", "LEFT", "RIGHT" };
 
+typedef struct LOGIC_CELL {
     int id;
+    bool locked;
+    int gain;
     PARTITION partition;
+
+    struct LOGIC_CELL *next;
+    struct LOGIC_CELL *prev;
 } LOGIC_CELL;
 
 LOGIC_CELL *logic_cells;
 
 typedef struct NET {
-    int num_logic_blocks;
+    int num_cells;
     int net_id;
 
-    LOGIC_CELL *src_cell;
-    LOGIC_CELL *sink_cell[MAX_NUM_SINKS];
+    LOGIC_CELL *cells[MAX_NUM_CELLS_PER_NET];
 
     struct NET *next;
     struct NET *prev;
@@ -64,9 +67,8 @@ CELL **grid_right;
 
 typedef enum STATE {
     IDLE,
-    INIT,
-    ITERATE,
-    PENDING_EXIT,
+    INIT1,
+    RECURSE,
     EXIT,
 } STATE;
 
@@ -76,11 +78,10 @@ int num_iterations = -1;
 int exit_counter = 0;
 
 int num_cells = -1;
+int balance = -1;
 int num_cnx = -1;
 int num_cols_per_partition = 0;
 int num_rows_per_partition = 0;
-
-float temp = 0.;
 
 void delay();
 void button_press(float x, float y);
@@ -91,12 +92,19 @@ void drawscreen();
 int parse_file(char *file);
 void print_net(NET *net);
 void add_to_list(NET **head, NET *n);
+void add_to_list(LOGIC_CELL **head, LOGIC_CELL *n);
+LOGIC_CELL *make_logic_cell(int id, PARTITION p);
+LOGIC_CELL *get_logic_cell(LOGIC_CELL *head, int id);
+LOGIC_CELL *copy_logic_cells(LOGIC_CELL *l);
+void destroy_logic_cell(LOGIC_CELL *l);
+
+int calculate_cost(LOGIC_CELL *l);
+int calculate_cost();
+
 void init_grid();
 double random(double from, double to);
 float std_dev(int *vals, int size);
 bool take_move(int delta_cost);
-void find_random_cells(int *c1, int *c2);
-
 
 void init_grid(bool left) {
     t_report report;
@@ -214,6 +222,15 @@ void randomize_array(int array[], int size) {
     }
 }
 
+void reset_grid(PARTITION partition) {
+    CELL **grid = (partition == LEFT) ? grid_left : grid_right;
+    for (int col = 0; col < num_cols_per_partition; col++) {
+        for (int row = 0; row < num_rows_per_partition; row++) {
+            grid[col][row].cell_id = -1; 
+        }
+    }
+}
+
 void assign_grid(int cell_id, PARTITION partition) {
     CELL **grid = (partition == LEFT) ? grid_left : grid_right;
     for (int col = 0; col < num_cols_per_partition; col++) {
@@ -227,43 +244,70 @@ void assign_grid(int cell_id, PARTITION partition) {
     }
 }
 
-void init_partition() {
-    for (int i = 0; i < num_cells; i++) {
-        logic_cells[i].partition = (i % 2 == 0) ? LEFT : RIGHT;
-        assign_grid(i, logic_cells[i].partition);
-    }
-    state = INIT;
-/*
-    int total = num_cols * num_rows;
-    int array[total];
-    for (int i = 0; i < total; i++) {
-        array[i] = i;
-    }
-
-    randomize_array(array, total);
-
-    for (int i = 0; i < num_cells; i++) {
-        printf("array[%d]: %d\n", i, array[i]);
-        int col = array[i] / num_rows;
-        int row = array[i] % num_rows;
-
-        if (grid[col][row].is_block) {
-            printf("ERROR!!! (%d, %d)\n", col, row);
-        } else {
-            grid[col][row].is_block = true;
-            grid[col][row].block_num = i;
-
-            logic_cells[i].col = col;
-            logic_cells[i].row = row;
-            printf("Found (%d, %d) for logic block: %d\n", col, row, i);
+bool all_nodes_locked() {
+    LOGIC_CELL *cur = logic_cells;
+    while (cur != NULL) {
+        if (!cur->locked) {
+            return false;
         }
+        cur = cur->next;
     }
-
-    state = INIT;
-    */
+    return true;
 }
 
-void find_random_cells(int *c1, int *c2) {
+int get_gain(LOGIC_CELL *l) {
+    // Gain of a node = # edges that cross partition - # edges that do not
+    NET *cur = all_nets;
+
+    int edges_cross = 0;
+    int edges_dont_cross = 0;
+
+    // Go through all nets
+    while (cur != NULL) {
+        PARTITION src_partition = UNKNOWN;
+
+        // For each net, go through its connections
+        for (int i = 0; i < cur->num_cells; i++) {
+
+            // See if this net contains this cell
+            if (l->id == cur->cells[i]->id) {
+                if (i == 0) { // source cell
+                    src_partition = l->partition;
+                    continue;
+                } else {
+                    // Not a source...so find the source
+                    LOGIC_CELL *c = get_logic_cell(logic_cells, cur->cells[0]->id);
+                    src_partition = c->partition;
+
+                    if (src_partition == l->partition) {
+                        edges_dont_cross++;
+                    } else {
+                        edges_cross++;
+                    }
+                    break;
+                }
+            }
+
+            // This is for if the cell is a source
+            if (src_partition != UNKNOWN) {
+                LOGIC_CELL *c = get_logic_cell(logic_cells, cur->cells[i]->id);
+                if (c->partition == src_partition) {
+                    edges_dont_cross++;
+                } else {
+                    edges_cross++;
+                }
+            }
+        }
+
+        cur = cur->next;
+    }
+
+    printf("Cell ID: %d has gain %d\n", l->id, edges_cross - edges_dont_cross);
+
+    return (edges_cross - edges_dont_cross);
+}
+
+void init_partition() {
     int array[num_cells];
     for (int i = 0; i < num_cells; i++) {
         array[i] = i;
@@ -271,160 +315,399 @@ void find_random_cells(int *c1, int *c2) {
 
     randomize_array(array, num_cells);
 
-    *c1 = array[0];
-    *c2 = array[1];
-#ifdef DEBUG
-    printf("Found random logic cell: %d, %d\n", *c1, *c2);
-#endif
+    for (int i = 0; i < num_cells; i++) {
+        printf("array[%d]: %d\n", i, array[i]);
+    }
+
+    for (int i = 0; i < num_cells; i++) {
+        LOGIC_CELL *cur = get_logic_cell(logic_cells, i);
+        cur->partition = (array[i] % 2 == 0) ? LEFT : RIGHT;
+    }
 }
 
-void swap_cells(LOGIC_CELL *c1, LOGIC_CELL *c2) {
-    int c1_col = c1->col;
-    int c1_row = c1->row;
-    int c2_col = c2->col;
-    int c2_row = c2->row;
+void init_partition2() {
+    /*
+    LOGIC_CELL *cur = logic_cells;
+    while (cur != NULL) {
+        cur->partition = (cur->id % 2 == 0) ? LEFT : RIGHT;
+        cur = cur->next;
+    }
+    */
+    int best_cost = INT_MAX;
 
-/*
-    int c1_blk = grid[c1_col][c1_row].block_num;
-    int c2_blk = grid[c2_col][c2_row].block_num;
-    grid[c1_col][c1_row].block_num = c2_blk;
-    grid[c2_col][c2_row].block_num = c1_blk;
+    LOGIC_CELL *tmp = copy_logic_cells(logic_cells);
 
-    c1->col = c2_col;
-    c1->row = c2_row;
-    c2->col = c1_col;
-    c2->row = c1_row;
-*/
-#ifdef DEBUG
-    printf("Swapped LOGIC_CELL %d from (%d, %d) to (%d, %d)\n", c1->id, c1_col, c1_row, c1->col, c1->row);
-    printf("Swapped LOGIC_CELL %d from (%d, %d) to (%d, %d)\n", c2->id, c2_col, c2_row, c2->col, c2->row);
-#endif
+    while (!all_nodes_locked()) {
+        // Calculate all gains
+        LOGIC_CELL *cur = tmp;
+        int id_with_highest_gain = -1;
+        int highest_gain = -INT_MAX;
+        int num_right = 0;
+        int num_left = 0;
+        while (cur != NULL) {
+            int gain = get_gain(cur);
+            cur->gain = gain;
+            if (cur->partition == LEFT) num_left++;
+            else if (cur->partition == RIGHT) num_right++;
+            cur = cur->next;
+        }
+
+        printf("Num left: %d Num right: %d\n", num_left, num_right);
+
+        // Now go through and see which ones we can move
+        cur = tmp;
+        while (cur != NULL) {
+            bool is_candidate = false;
+            if (!cur->locked) {
+                // Cell isn't locked...now see if we're still balanced
+                if (num_left > num_right) {
+                    // Then we can only move left side cells
+                    if (cur->partition == LEFT) {
+                        is_candidate = true;
+                    }
+                } else if (num_left < num_right) {
+                    // Then we can only move right side cells
+                    if (cur->partition == RIGHT) {
+                        is_candidate = true;
+                    }
+                } else {
+                    // Then who cares...
+                    is_candidate = true;
+                }
+            }
+
+            if (is_candidate) {
+                printf("Cell %d is a candidate with gain %d vs highest gain: %d\n", cur->id, cur->gain, highest_gain);
+                // If the candidate has a higher gain than what we've seen so far
+                if (cur->gain > highest_gain) {
+                    highest_gain = cur->gain;
+                    id_with_highest_gain = cur->id;
+                }
+            }
+            cur = cur->next;
+        }
+
+        // Choose node from candidate cells with highest gain
+        if (id_with_highest_gain != -1) {
+            LOGIC_CELL *c = get_logic_cell(tmp, id_with_highest_gain);
+            if (c->partition == LEFT) {
+                c->partition = RIGHT;
+            } else {
+                c->partition = LEFT;
+            }
+
+            int cost = calculate_cost(tmp);
+            if (cost < best_cost) {
+                best_cost = cost;
+                // Record the solution
+                LOGIC_CELL *l_cur = logic_cells;
+                while (l_cur != NULL) {
+                    LOGIC_CELL *c = get_logic_cell(tmp, l_cur->id);
+                    l_cur->partition = c->partition;
+                    l_cur = l_cur->next;
+                }
+            }
+
+            c->locked = true;
+        } else {
+            printf("ERROR: couldn't find a candidate cell with the highest gain\n");
+            break;
+        }
+    }
+    destroy_logic_cell(tmp);
 }
 
+void reset_partition() {
+    LOGIC_CELL *cur = logic_cells;
+    while (cur != NULL) {
+        cur->partition = UNKNOWN;
+        cur = cur->next;
+    }
+}
+
+int calculate_cost(LOGIC_CELL *l) {
+    NET *cur = all_nets;
+    int total_cost = 0;
+
+    while (cur != NULL) {
+        PARTITION cur_partition = UNKNOWN;
+
+        for (int i = 0; i < cur->num_cells; i++) {
+            int cur_id = cur->cells[i]->id;
+            LOGIC_CELL *c = get_logic_cell(l, cur_id);
+            if (c != NULL) {
+                if (cur_partition == UNKNOWN) {
+                    cur_partition = c->partition;
+                } else {
+                    // see if the cell has a valid partition that is different
+                    if (c->partition != UNKNOWN) {
+                        if (c->partition != cur_partition) {
+                            total_cost++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        cur = cur->next;
+    }
+
+#ifdef DEBUG
+//    printf("Total cost: %d\n", total_cost);
+#endif
+
+    return total_cost;
+}
 
 int calculate_cost() {
     /**
-     * Calcuate cost:
-     *
-     * So suppose you have n nets, each with some number of pins (at least 2, but sometimes more).
-     * For net i, we would cycle through all the pins in this net. Each pin has a location, xj and yj.  Suppose
-     * the minimum xj for all pins on net i is xi,min and the maximum xj for all pins on net i is xi,max.
-     * Further, suppose the minimum yj for all pins on net i is yi,min and the maximum yj for all pins on net i is yi,max.
-     * Then, the size of net i can be approximated by
-     *      si = (yi,max - yi,min ) + ( xi,max - xi,min )
-     *
-     * In other words, for each net, find the minimum rectangular area that encompasses all pins in that net.
-     * Then si is the sum of the x span plus the y span of this rectangular area.  It is also 1/2 the perimeter of
-     * the rectangular area (which is why it is called .half perimeter.).
-     *
-     * Then, the total cost of a placement is
-     *      the sum of si for all i
-     *          (in other words, add up the costs of each net to get an overall cost).
+     * Cost is determined by the number of nets that cross the partition. If a
+     * net connects cells that falls in both partitions, then that net contributes
+     * a cost of 1 to the total crossing count. That is, the maximum cost is the
+     * number of nets in this circuit.
      */
     NET *cur = all_nets;
     int total_cost = 0;
 
     while (cur != NULL) {
-        int cur_cost = 0;
-        int col_min = INT_MAX;
-        int col_max = 0;
-        int row_min = INT_MAX;
-        int row_max = 0;
-
-        // Start with the source cell of this net
-        if (cur->src_cell != NULL) {
-            LOGIC_CELL *c = cur->src_cell;
-            int col = c->col;
-            int row = c->row;
-
-            // Update min/max values for columns and rows
-            IS_MIN_AND_SET(col, col_min);
-            IS_MAX_AND_SET(col, col_max);
-            IS_MIN_AND_SET(row, row_min);
-            IS_MAX_AND_SET(row, row_max);
-        } else {
-            printf("WARN: invalid source logic cell\n");
+        PARTITION cur_partition = UNKNOWN;
+        // Go through all the cells of this net
+        for (int i = 0; i < cur->num_cells; i++) {
+            LOGIC_CELL *c = cur->cells[i];
+            // First time
+            if (cur_partition == UNKNOWN) {
+                cur_partition = c->partition;
+            } else {
+                // see if the cell has a valid partition that is
+                // different
+                if (c->partition != UNKNOWN) {
+                    if (c->partition != cur_partition) {
+                        total_cost++;
+                        break;
+                    }
+                }
+            }
         }
-
-        // Go through all the sink cells of this net
-        for (int i = 0; i < cur->num_logic_blocks - 1; i++) {
-            LOGIC_CELL *c = cur->sink_cell[i];
-            int col = c->col;
-            int row = c->row;
-
-            // Update min/max values for columns and rows
-            IS_MIN_AND_SET(col, col_min);
-            IS_MAX_AND_SET(col, col_max);
-            IS_MIN_AND_SET(row, row_min);
-            IS_MAX_AND_SET(row, row_max);
-        }
-
-        cur_cost = (col_max - col_min) + (row_max - row_min);
-        total_cost += cur_cost;
-#ifdef DEBUG
-//        printf("Cost of net %d: (%d - %d) + (%d - %d) = %d\n", cur->net_id, col_max, col_min, row_max, row_min, cur_cost);
-//        printf("Total cost: %d\n", total_cost);
-#endif
         cur = cur->next;
     }
+
+#ifdef DEBUG
+    printf("Total cost: %d\n", total_cost);
+#endif
     return total_cost;
 }
 
-float std_dev(int *vals, int size) {
-    float mean, stddev;
-    float sum = 0;
-    for (int i = 0; i < size; i++) {
-        sum += (float)vals[i];
+int final_cost = 0;
+
+int size_of(LOGIC_CELL *head) {
+    LOGIC_CELL *cur = head;
+    int size = 0;
+    while (cur != NULL) {
+        size++;
+        cur = cur->next;
     }
-    mean = sum / (float)size;
-#ifdef DEBUG
-    printf("Mean: %f\n", mean);
-#endif
-    sum = 0;
-    for (int i = 0; i < size; i++) {
-       sum += pow((float)vals[i] - mean, 2);
-    }
-    mean = sum / (float)size;
-    stddev = sqrt(mean);
-#ifdef DEBUG
-    printf("Std dev: %f\n", stddev);
-#endif
-    return stddev;
+    return size;
 }
 
-void run_init_temp() {
-    int c1 = -1;
-    int c2 = -1;
+bool is_valid_current_assignment(LOGIC_CELL *head) {
+    bool is_valid = true;
+    int num_left = 0;
+    int num_right = 0;
+    LOGIC_CELL *cur = head;
+    while (cur != NULL) {
+        if (cur->partition == LEFT) {
+            num_left++;
+        } else if (cur->partition == RIGHT) {
+            num_right++;
+        }
 
-    int all_costs[NUM_INIT_ITERATIONS];
-
-    for (int i = 0; i < NUM_INIT_ITERATIONS; i++) {
-        printf("Iteration: %d\n", i);
-
-        // Find 2 random cells to swap
-        find_random_cells(&c1, &c2);
-        LOGIC_CELL *cell1 = &logic_cells[c1];
-        LOGIC_CELL *cell2 = &logic_cells[c2];
-
-        // Swap the two cells
-        swap_cells(cell1, cell2);
-
-        // Calculate the cost
-        all_costs[i] = calculate_cost();
+        if (num_left > balance || num_right > balance) {
+            is_valid = false;
+            break;
+        }
+        cur = cur->next;
     }
-
-    // Initial temp = 20 * std_dev(costs over the NUM_INIT_ITERATIONS moves
-    temp = 20 * std_dev(all_costs, NUM_INIT_ITERATIONS);
-
-    printf("Initial temperature: %f\n", temp);
-
-    state = ITERATE;
+    return is_valid;
 }
 
-void update_temp() {
-    printf("Temperature: %f\n", temp);
-    temp = temp * BETA_TEMP_FACTOR;
-    printf("New temperature: %f\n", temp);
+bool is_valid_solution(LOGIC_CELL *head) {
+    bool is_valid = true;
+    LOGIC_CELL *cur = head;
+    if (size_of(head) == num_cells) {
+        int num_left = 0;
+        int num_right = 0;
+        while (cur != NULL) {
+            if (cur->partition == LEFT) {
+                num_left++;
+            } else if (cur->partition == RIGHT) {
+                num_right++;
+            } else {
+                printf("WARNING: UNKNOWN partition!\n");
+                return false;
+            }
+
+            if (num_left > balance || num_right > balance) {
+                return false;
+            }
+            cur = cur->next;
+        }
+    } else {
+        printf("Num cells: %d Size of cells: %d\n", num_cells, size_of(head));
+        is_valid = false;
+    }
+
+    return is_valid;
+}
+
+#if 0
+void do_recursion(LOGIC_CELL *cur_ass, LOGIC_CELL *next_node) {
+
+#ifdef DEBUG
+//    printf("Current assignment size: %d, Next node: %d Final_cost: %d\n", size_of(cur_ass), (next_node == NULL) ? -1 : next_node->id, final_cost);
+#endif
+
+    if (!is_valid_current_assignment(cur_ass)) {
+#ifdef DEBUG
+        printf("Pruning...not valid current assignment %d\n", final_cost);
+#endif
+        return;
+    }
+    // if there is no next node to assign
+    if (next_node == NULL) {
+        int cur_cost = calculate_cost(cur_ass);
+
+        // if this is the best soln so far, record it
+        if (cur_cost < final_cost) {
+            final_cost = cur_cost;
+
+            printf("Recorded better solution: %d\n", final_cost);
+
+            // Record the partition solution
+            LOGIC_CELL *cur = logic_cells;
+            while (cur != NULL) {
+                LOGIC_CELL *c = get_logic_cell(cur_ass, cur->id);
+                cur->partition = c->partition;
+                cur = cur->next;
+            }
+            destroy_logic_cell(cur_ass);
+        }
+    } else {
+        // calculate label(x)
+        int cur_cost = calculate_cost(cur_ass);
+
+        // if (x < best solution so far) 
+        if (cur_cost < final_cost) {
+            int nn_id = next_node->id;
+            LOGIC_CELL *nn_left = make_logic_cell(nn_id, LEFT);
+            LOGIC_CELL *nn_right = make_logic_cell(nn_id, RIGHT);
+            LOGIC_CELL *cur_left = copy_logic_cells(cur_ass);
+            LOGIC_CELL *cur_right = copy_logic_cells(cur_ass);
+            bool last_node = (nn_id + 1 >= num_cells);
+
+            destroy_logic_cell(cur_ass);
+            destroy_logic_cell(next_node);
+
+            add_to_list(&cur_left, nn_left);
+
+            LOGIC_CELL *tmp_nn_left = NULL;
+            if (!last_node) {
+                tmp_nn_left = make_logic_cell(nn_id + 1, UNKNOWN);
+            }
+            do_recursion(cur_left, tmp_nn_left);
+
+            add_to_list(&cur_right, nn_right);
+            LOGIC_CELL *tmp_nn_right = NULL;
+            if (!last_node) {
+                tmp_nn_right = make_logic_cell(nn_id + 1, UNKNOWN);
+            }
+            do_recursion(cur_right, tmp_nn_right);
+        }
+    }
+}
+
+
+#else
+void do_recursion(LOGIC_CELL *cur_ass, LOGIC_CELL *next_node) {
+
+#ifdef DEBUG
+//    printf("Current assignment size: %d, Next node: %d Final_cost: %d\n", size_of(cur_ass), (next_node == NULL) ? -1 : next_node->id, final_cost);
+#endif
+
+    if (!is_valid_current_assignment(cur_ass)) {
+        destroy_logic_cell(cur_ass);
+        destroy_logic_cell(next_node);
+#ifdef DEBUG
+        printf("Pruning...not valid current assignment %d\n", final_cost);
+#endif
+        return;
+    }
+    // if there is no next node to assign
+    if (next_node == NULL) {
+        int cur_cost = calculate_cost(cur_ass);
+
+        // if this is the best soln so far, record it
+        if (cur_cost < final_cost) {
+            final_cost = cur_cost;
+
+            printf("Recorded better solution: %d\n", final_cost);
+
+            // Record the partition solution
+            LOGIC_CELL *cur = logic_cells;
+            while (cur != NULL) {
+                LOGIC_CELL *c = get_logic_cell(cur_ass, cur->id);
+                cur->partition = c->partition;
+                cur = cur->next;
+            }
+        }
+
+        destroy_logic_cell(cur_ass);
+        destroy_logic_cell(next_node);
+    } else {
+        // calculate label(x)
+        int cur_cost = calculate_cost(cur_ass);
+
+        // if (x < best solution so far) 
+        if (cur_cost < final_cost) {
+            int nn_id = next_node->id;
+            LOGIC_CELL *nn_left = make_logic_cell(nn_id, LEFT);
+            LOGIC_CELL *cur_left = copy_logic_cells(cur_ass);
+            bool last_node = (nn_id + 1 >= num_cells);
+
+            destroy_logic_cell(cur_ass);
+            destroy_logic_cell(next_node);
+            
+            LOGIC_CELL *cur_right = copy_logic_cells(cur_left);
+            LOGIC_CELL *nn_right = make_logic_cell(nn_id, RIGHT);
+
+            add_to_list(&cur_left, nn_left);
+
+            LOGIC_CELL *tmp_nn_left = NULL;
+            if (!last_node) {
+                tmp_nn_left = make_logic_cell(nn_id + 1, UNKNOWN);
+            }
+            do_recursion(cur_left, tmp_nn_left);
+
+            add_to_list(&cur_right, nn_right);
+            LOGIC_CELL *tmp_nn_right = NULL;
+            if (!last_node) {
+                tmp_nn_right = make_logic_cell(nn_id + 1, UNKNOWN);
+            }
+            do_recursion(cur_right, tmp_nn_right);
+        } else {
+            destroy_logic_cell(cur_ass);
+            destroy_logic_cell(next_node);
+        }
+    }
+}
+
+#endif
+
+void run_algo() {
+    LOGIC_CELL *l = make_logic_cell(0, UNKNOWN);
+
+    // By default, make first cell left
+    do_recursion(NULL, l);
 }
 
 void run_partition() {
@@ -432,95 +715,39 @@ void run_partition() {
         case IDLE: {
             printf("State is IDLE\n");
             init_partition();
-        } break;
-        case INIT: {
-            printf("State is INIT\n");
-            run_init_temp();
-            num_iterations = 10 * pow((double)num_cells, (double)(4.0/3.0));
-            printf("Number of iterations: %d\n", num_iterations);
-        } break;
-        case ITERATE: {
-            int cur_cost, prev_cost = -1;
-            for (int i = 0; i < num_iterations; i++) {
-                int c1, c2;
-                find_random_cells(&c1, &c2);
-                LOGIC_CELL *cell1 = &logic_cells[c1];
-                LOGIC_CELL *cell2 = &logic_cells[c2];
-
-                // Get previous cost
-                if (prev_cost == -1) {
-                    prev_cost = calculate_cost();
-                }
-
-                // Swap the two cells
-                swap_cells(cell1, cell2);
-
-                // Get the cost of the new placement
-                cur_cost = calculate_cost();
-
-                // Find the change in cost
-                int delta_cost = cur_cost - prev_cost;
-                printf("cur_cost: %d - prev_cost: %d = delta_cost: %d\n", cur_cost, prev_cost, delta_cost);
-                if (take_move(delta_cost)) {
-                    printf("Taking move in iteration %d\n", i);
-
-                    // Update cost
-                    prev_cost = cur_cost;
-
-                    // Reset the exit counter if we are taking a move
-                    exit_counter = 0;
-                } else {
-                    printf("***Not taking the move in iteration %d exit_counter: %d temp: %f\n", i, exit_counter, temp);
-                    // Undo the swap
-                    swap_cells(cell1, cell2);
-                    exit_counter++;
-                }
-
-                // Check to see if we need to update state (i.e. meet exit criteria)
-                if (exit_counter > EXIT_COUNT) {
-                    printf("We are exiting due to exit_counter. Setting state to PENDING_EXIT\n");
-                    printf("Cost: %d Temp: %f\n", prev_cost, temp);
-                    state = PENDING_EXIT;
-                    break;
-                }
+            LOGIC_CELL *cur = logic_cells;
+            while (cur != NULL) {
+                assign_grid(cur->id, cur->partition);
+                cur = cur->next;
             }
-
-            if (state != PENDING_EXIT) {
-                printf("Finished one iteration loop for temp: %f. Cost: %d\n", temp, cur_cost);
-                // Update temp
-                update_temp();
-            }
+            final_cost = calculate_cost();
+            state = INIT1;
         } break;
-        case PENDING_EXIT: {
-            // Before we quit, let's make one more swap and see if we improve
-            int c1, c2;
-            find_random_cells(&c1, &c2);
-            LOGIC_CELL *cell1 = &logic_cells[c1];
-            LOGIC_CELL *cell2 = &logic_cells[c2];
+        case INIT1: {
+            printf("State is INIT1\n");
+            reset_grid(LEFT);
+            reset_grid(RIGHT);
 
-            // Get previous cost
-            int prev_cost = calculate_cost();
-
-            // Swap the two cells
-            swap_cells(cell1, cell2);
-
-            // Get the cost of the new placement
-            int cur_cost = calculate_cost();
-
-            // Find the change in cost
-            int delta_cost = cur_cost - prev_cost;
-
-            printf("%d - %d = delta_cost %d\n", cur_cost, prev_cost, delta_cost);
-
-            if (delta_cost < 0) {
-                // We are still improving so we should keep iterating
-                printf("Resetting state to ITERATE\n");
-                state = ITERATE;
-            } else {
-                state = EXIT;
-                printf("Final cost: %d Final Temp: %f\n", prev_cost, temp);
-                debug_button_func(NULL);
+            init_partition2();
+            LOGIC_CELL *cur = logic_cells;
+            while (cur != NULL) {
+                assign_grid(cur->id, cur->partition);
+                cur = cur->next;
             }
+            final_cost = calculate_cost();
+            state = RECURSE;
+        } break;
+        case RECURSE: {
+            printf("State is RECURSE\n");
+            run_algo();
+            reset_grid(LEFT);
+            reset_grid(RIGHT);
+            LOGIC_CELL *cur = logic_cells;
+            while (cur != NULL) {
+                assign_grid(cur->id, cur->partition);
+                cur = cur->next;
+            }
+            state = EXIT;
         } break;
         case EXIT: {
             printf("We are done!\n");
@@ -549,35 +776,14 @@ void proceed_state_button_func(void (*drawscreen_ptr) (void)) {
         printf("Nothing else to do!\n");
 }
 
-
-bool take_move(int delta_cost) {
-    // If cost is less than 0, then we take move for sure
-    if (delta_cost < 0) {
-        return true;
-    }
-    // If no cost change, just ignore it.
-    if (delta_cost == 0) {
-        return false;
-    }
-
-    // Get a random number between 0 and 1
-    double rand = random(0, 1);
-
-    // We take move if rand < e^(-delta_cost/temp)
-    double e = exp((double)((delta_cost * -1.0)/(double)temp));
-    printf("rand %f < exp: %f ?\n", rand, e);
-    return (rand < e);
-}
-
 void print_net(NET *net) {
     int i;
     if (net == NULL) {
         printf("Net is NULL\n");
     } else {
-        printf("Net: num logic blocks: %d\n", net->num_logic_blocks);
-        printf("     Source: %d (%d, %d)\n", net->src_cell->id, net->src_cell->col, net->src_cell->row);
-        for (i = 0; i < net->num_logic_blocks - 1; i++) {
-            printf("     Sink[%d]: %d (%d, %d)\n", i, net->sink_cell[i]->id, net->sink_cell[i]->col, net->sink_cell[i]->row);
+        printf("Net: num logic blocks: %d\n", net->num_cells);
+        for (i = 0; i < net->num_cells; i++) {
+            printf("     Cell[%d]: %d partition (%s)\n", i, net->cells[i]->id, PARTITION_STR[net->cells[i]->partition]);
         }
     }
 }
@@ -585,8 +791,9 @@ void print_net(NET *net) {
 
 void debug_button_func(void (*drawscreen_ptr) (void)) {
     printf("Logic cells:\n");
-    for (int i = 0; i < num_cells; i++) {
-        printf("  [%d] - id: %d (%d, %d)\n", i, logic_cells[i].id, logic_cells[i].col, logic_cells[i].row);
+    LOGIC_CELL *tmp = logic_cells;
+    while (tmp != NULL) {
+        printf("  id: %d - partition (%s)\n", tmp->id, PARTITION_STR[tmp->partition]);
     }
 
     printf("\nNets: \n");
@@ -627,15 +834,16 @@ int parse_file(char *file) {
 
                     token = strtok(line, delim);
                     num_cells = atoi(token);
+                    balance = num_cells / 2;
+                    if (num_cells % 2) {
+                        balance++;
+                    }
                     token = strtok(NULL, delim);
                     num_cnx = atoi(token);
 
-                    logic_cells = (LOGIC_CELL *)malloc(sizeof(LOGIC_CELL) * num_cells);
                     for (int i = 0; i < num_cells; i++) {
-                        logic_cells[i].id = i;
-                        logic_cells[i].col = -1;
-                        logic_cells[i].row = -1;
-                        logic_cells[i].partition = UNKNOWN;
+                        LOGIC_CELL *c = make_logic_cell(i, UNKNOWN);
+                        add_to_list(&logic_cells, c);
                     }
 #ifdef DEBUG
                     printf("Num cells: %d, Num cnx: %d\n", num_cells, num_cnx);
@@ -651,20 +859,15 @@ int parse_file(char *file) {
 
                     // First number is # logic blocks this net connects
                     token = strtok(line, delim);
-                    net->num_logic_blocks = atoi(token);
+                    net->num_cells = atoi(token);
                     net->net_id = line_num - 1;
 
                     // Remaining numbers are the block numbers connected to this net.
-                    // Get the source block first
-                    token = strtok(NULL, delim);
-                    int src_id = atoi(token);
-                    net->src_cell = &(logic_cells[src_id]);
-
-                    // Rest are sink blocks
-                    for (i = 0; i < net->num_logic_blocks - 1; i++) {
+                    for (i = 0; i < net->num_cells; i++) {
                         token = strtok(NULL, delim);
-                        int snk_id = atoi(token);
-                        net->sink_cell[i] = &(logic_cells[snk_id]);
+                        int cell_id = atoi(token);
+                        LOGIC_CELL *c = get_logic_cell(logic_cells, cell_id);
+                        net->cells[i] = c;
                     }
 
 #ifdef DEBUG
@@ -715,7 +918,7 @@ void delay() {
     int i, j, k, sum;
 
     sum = 0;
-    for (i = 0; i < 1000; i++)
+    for (i = 0; i < 100; i++)
         for (j = 0; j < i; j++)
             for (k = 0; k < 30; k++)
                 sum = sum + i + j - k;
@@ -739,6 +942,69 @@ void add_to_list(NET **head, NET *n) {
     n->next = NULL;
 }
 
+void add_to_list(LOGIC_CELL **head, LOGIC_CELL *n) {
+    LOGIC_CELL *cur = *head;
+
+    if (*head == NULL) {
+        *head = n;
+        return;
+    }
+
+    // Go to the end of the list
+    while (cur->next != NULL) {
+        cur = cur->next;
+    }
+
+    cur->next = n;
+    n->prev = cur;
+    n->next = NULL;
+}
+
+LOGIC_CELL *make_logic_cell(int id, PARTITION p) {
+    LOGIC_CELL *l = (LOGIC_CELL *)malloc(sizeof(LOGIC_CELL));
+    l->id = id;
+    l->partition = p;
+    l->gain = 0;
+    l->locked = false;
+    l->next = NULL;
+    l->prev = NULL;
+
+    return l;
+}
+
+LOGIC_CELL *get_logic_cell(LOGIC_CELL *head, int id) {
+    LOGIC_CELL *cur = head;
+    LOGIC_CELL *ret = NULL;
+    while (cur != NULL) {
+        if (cur->id == id) {
+            ret = cur;
+            break;
+        }
+        cur = cur->next;
+    }
+    return ret;
+}
+
+LOGIC_CELL *copy_logic_cells(LOGIC_CELL *l) {
+    LOGIC_CELL *cur = l;
+    LOGIC_CELL *copy = NULL;
+    while (cur != NULL) {
+        LOGIC_CELL *tmp = make_logic_cell(cur->id, cur->partition);
+        add_to_list(&copy, tmp);
+        cur = cur->next;
+    }
+
+    return copy;
+}
+
+void destroy_logic_cell(LOGIC_CELL *l) {
+    LOGIC_CELL *cur = l;
+    while (cur != NULL) {
+        LOGIC_CELL *next = cur->next;
+        free(cur);
+        cur = next;
+    }
+}
 
 void button_press(float x, float y) {
     printf("User clicked a button at coordinates (%f, %f)\n", x, y);
