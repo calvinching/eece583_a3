@@ -10,4 +10,4 @@ To run the program, execute the following:
 
 For example:
 
-    ./example benchmarks/paira.txt
+    ./example benchmarks/cc.txt
