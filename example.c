@@ -11,12 +11,6 @@
 #define SUCCESS 0
 #define ERROR -1
 #define MAX_NUM_CELLS_PER_NET 500
-#define NUM_INIT_ITERATIONS 50 // Number of times to run the random move to find the initial temperature
-#define BETA_TEMP_FACTOR 0.9
-#define EXIT_COUNT 500
-
-#define IS_MIN_AND_SET(x, y) if (x < y) y = x;
-#define IS_MAX_AND_SET(x, y) if (x > y) y = x;
 
 typedef enum PARTITION {
     UNKNOWN,
@@ -82,10 +76,10 @@ int balance = -1;
 int num_cnx = -1;
 int num_cols_per_partition = 0;
 int num_rows_per_partition = 0;
+int final_cost = 0;
 
 void delay();
 void button_press(float x, float y);
-void proceed_button_func(void (*drawscreen_ptr) (void));
 void proceed_state_button_func(void (*drawscreen_ptr) (void));
 void debug_button_func(void (*drawscreen_ptr) (void));
 void drawscreen();
@@ -192,7 +186,6 @@ int main(int argc, char **argv) {
     parse_file(file);
     init_grid();
 
-    create_button("Window", "Go 1 Step", proceed_button_func);
     create_button("Window", "Go 1 State", proceed_state_button_func);
     create_button("Window", "Debug", debug_button_func);
     drawscreen();
@@ -326,13 +319,6 @@ void init_partition() {
 }
 
 void init_partition2() {
-    /*
-    LOGIC_CELL *cur = logic_cells;
-    while (cur != NULL) {
-        cur->partition = (cur->id % 2 == 0) ? LEFT : RIGHT;
-        cur = cur->next;
-    }
-    */
     int best_cost = INT_MAX;
 
     LOGIC_CELL *tmp = copy_logic_cells(logic_cells);
@@ -410,7 +396,7 @@ void init_partition2() {
 
             c->locked = true;
         } else {
-            printf("ERROR: couldn't find a candidate cell with the highest gain\n");
+            printf("Can't find a candidate cell with the highest gain\n");
             break;
         }
     }
@@ -454,7 +440,7 @@ int calculate_cost(LOGIC_CELL *l) {
     }
 
 #ifdef DEBUG
-//    printf("Total cost: %d\n", total_cost);
+    printf("Total cost: %d\n", total_cost);
 #endif
 
     return total_cost;
@@ -497,8 +483,6 @@ int calculate_cost() {
 #endif
     return total_cost;
 }
-
-int final_cost = 0;
 
 int size_of(LOGIC_CELL *head) {
     LOGIC_CELL *cur = head;
@@ -560,78 +544,10 @@ bool is_valid_solution(LOGIC_CELL *head) {
     return is_valid;
 }
 
-#if 0
 void do_recursion(LOGIC_CELL *cur_ass, LOGIC_CELL *next_node) {
 
 #ifdef DEBUG
-//    printf("Current assignment size: %d, Next node: %d Final_cost: %d\n", size_of(cur_ass), (next_node == NULL) ? -1 : next_node->id, final_cost);
-#endif
-
-    if (!is_valid_current_assignment(cur_ass)) {
-#ifdef DEBUG
-        printf("Pruning...not valid current assignment %d\n", final_cost);
-#endif
-        return;
-    }
-    // if there is no next node to assign
-    if (next_node == NULL) {
-        int cur_cost = calculate_cost(cur_ass);
-
-        // if this is the best soln so far, record it
-        if (cur_cost < final_cost) {
-            final_cost = cur_cost;
-
-            printf("Recorded better solution: %d\n", final_cost);
-
-            // Record the partition solution
-            LOGIC_CELL *cur = logic_cells;
-            while (cur != NULL) {
-                LOGIC_CELL *c = get_logic_cell(cur_ass, cur->id);
-                cur->partition = c->partition;
-                cur = cur->next;
-            }
-            destroy_logic_cell(cur_ass);
-        }
-    } else {
-        // calculate label(x)
-        int cur_cost = calculate_cost(cur_ass);
-
-        // if (x < best solution so far) 
-        if (cur_cost < final_cost) {
-            int nn_id = next_node->id;
-            LOGIC_CELL *nn_left = make_logic_cell(nn_id, LEFT);
-            LOGIC_CELL *nn_right = make_logic_cell(nn_id, RIGHT);
-            LOGIC_CELL *cur_left = copy_logic_cells(cur_ass);
-            LOGIC_CELL *cur_right = copy_logic_cells(cur_ass);
-            bool last_node = (nn_id + 1 >= num_cells);
-
-            destroy_logic_cell(cur_ass);
-            destroy_logic_cell(next_node);
-
-            add_to_list(&cur_left, nn_left);
-
-            LOGIC_CELL *tmp_nn_left = NULL;
-            if (!last_node) {
-                tmp_nn_left = make_logic_cell(nn_id + 1, UNKNOWN);
-            }
-            do_recursion(cur_left, tmp_nn_left);
-
-            add_to_list(&cur_right, nn_right);
-            LOGIC_CELL *tmp_nn_right = NULL;
-            if (!last_node) {
-                tmp_nn_right = make_logic_cell(nn_id + 1, UNKNOWN);
-            }
-            do_recursion(cur_right, tmp_nn_right);
-        }
-    }
-}
-
-
-#else
-void do_recursion(LOGIC_CELL *cur_ass, LOGIC_CELL *next_node) {
-
-#ifdef DEBUG
-//    printf("Current assignment size: %d, Next node: %d Final_cost: %d\n", size_of(cur_ass), (next_node == NULL) ? -1 : next_node->id, final_cost);
+    printf("Current assignment size: %d, Next node: %d Final_cost: %d\n", size_of(cur_ass), (next_node == NULL) ? -1 : next_node->id, final_cost);
 #endif
 
     if (!is_valid_current_assignment(cur_ass)) {
@@ -701,12 +617,8 @@ void do_recursion(LOGIC_CELL *cur_ass, LOGIC_CELL *next_node) {
     }
 }
 
-#endif
-
 void run_algo() {
     LOGIC_CELL *l = make_logic_cell(0, UNKNOWN);
-
-    // By default, make first cell left
     do_recursion(NULL, l);
 }
 
@@ -757,11 +669,6 @@ void run_partition() {
             printf("ERROR: unknown state!\n");
         } break;
     }
-}
-
-void proceed_button_func(void (*drawscreen_ptr) (void)) {
-    run_partition();
-    drawscreen();
 }
 
 void proceed_state_button_func(void (*drawscreen_ptr) (void)) {
@@ -824,7 +731,7 @@ int parse_file(char *file) {
                     continue;
                 }
 #ifdef DEBUG
-                printf("Parse_file[%d] (%d): %s", line_num, strlen(line), line);
+                printf("Parse_file[%d] (%d): %s", line_num, (int)strlen(line), line);
 #endif
 
                 // First line contains # cells, # cnx btw cells, # rows, # cols
