@@ -7,7 +7,7 @@
 #include "graphics.h"
 #include <sys/time.h>
 
-#define DEBUG
+//#define DEBUG
 #define SUCCESS 0
 #define ERROR -1
 #define MAX_NUM_CELLS_PER_NET 500
